@@ -1,0 +1,250 @@
+<html>
+<head>
+<style>
+body { margin: 0; }
+canvas { width: 100%; height: 100% }
+</style>
+</head>
+<body>
+<script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.skypack.dev/three@0.145.0/build/three.module",
+            "three/": "https://cdn.skypack.dev/three@0.145.0/"
+        }
+    }
+</script>
+<script type="module">
+    import * as THREE from 'three';
+    import {OrbitControls} from 'three/examples/jsm/controls/OrbitControls';
+    var scene, camera, renderer,    //Objetos básicos para la visualización
+        camControls,                //Objeto de control de la cámara
+        raycaster,                  //Objeto de control de colisiones con el cursor
+        raton,                      //Posición del ratón escalada a la pantalla
+        cubeArray,                  //Array de cubos que componen el cubo de Rubik
+        capa,                       //Cubos actualmente sometidos a un movimiento
+        selectedCube,               //Cubo seleccionado para direccionar el movimiento
+        normal,                     //Normal de la cara seleccionada del cubo anterior
+        ejeGiro,                    //Eje alrededor del cual se realiza el movimiento
+        framesRestantes;            //Frames restantes del movimiento actual
+    
+    const framesGiro = 30;          //Frames que tarda en realizarse un movimiento
+    
+    const orientacionColores = {    //Coloración de las caras externas en función de su normal
+        0xffffff: new THREE.Vector3(0, 0, 1),   //Blanco
+        0x0202fa: new THREE.Vector3(0, 0, -1),  //Azul
+        0xef0d11: new THREE.Vector3(0, 1, 0),   //Rojo
+        0xfb6801: new THREE.Vector3(0, -1, 0),  //Naranja
+        0x0cea0d: new THREE.Vector3(1, 0, 0),   //Verde
+        0xf1f00c: new THREE.Vector3(-1, 0, 0)   //Amarillo
+    };
+
+    //Función auxiliar que devuelve un índice correspondiente a la componente
+    //no nula de un vector (para obtenerla mediante Vector3.getComponent)
+    //Se asume que el vector solo tiene una componente no nula
+    function getNotZeroComponent(vector) {
+        if (vector.x != 0) {
+            return 0;
+        }
+        if (vector.y != 0) {
+            return 1;
+        }
+        if (vector.z != 0) {
+            return 2;
+        }
+    }
+
+    //Función que actualiza la posición del cursor escalada a la pantalla
+    //cada vez que se mueve el ratón
+    function onPointerMove( event ) {
+        raton.x = (event.clientX / window.innerWidth) * 2 - 1;
+        raton.y = - (event.clientY / window.innerHeight) * 2 + 1;
+    }
+
+    //Función encargada de registrar la primera parte de un movimiento
+    function startMovement(event) {
+        //Se elije la intersección más cercana al rayo (la que esté de frente)
+        const intersection = raycaster.intersectObjects(cubeArray)[0];
+        //Si un movimiento se está realizando (framesRestantes > 0), no se puede registrar otro movimiento
+        if (framesRestantes == 0 && intersection != undefined && intersection['face'] != undefined) {
+            //Durante la declaración del movimiento, se
+            //desactiva temporalmente el movimiento de la cámara
+            camControls.enabled = false;
+            //Se toma la posición del cubo y la normal a la cara del cubo que intersecciona
+            selectedCube = intersection['object']['position'].clone();
+            normal = intersection['face']['normal'].clone();
+            //El vector normal no se actualiza al rotar el cubo,
+            //por lo que se le aplica la rotación que este tenga
+            const rotation = intersection['object']['rotation'];
+            normal.applyEuler(rotation).round();
+        }
+    }
+
+    //Función encargada de registrar la segunda parte de un movimiento
+    function confirmMovement(event) {
+        //Se vuelve a activar la cámara al confirmar el movimiento
+        camControls.enabled = true;
+        //Solo se procede si un movimiento ha sido declarado previamente
+        if (selectedCube != undefined) {
+            const newIntersection = raycaster.intersectObjects(cubeArray)[0];
+            if (newIntersection != undefined && newIntersection['face'] != undefined) {
+                //Se vuelve a tomar la posición del cubo intersectado más cercano
+                const newCube = newIntersection['object']['position'].clone();
+                //Se calcula el vector que va de "selectedCube" a "newCube"
+                //Este vector indica la dirección del movimiento
+                const cubeVector = selectedCube.clone().add(newCube.clone().negate());
+                //Se comprueba que los dos cubos seleccionados formen un movimiento válido
+                //Para ello, el vector que va de uno a otro debe ser ortogonal (paralelo a los ejes)
+                //Cualquier movimiento "diagonal" tendrá un módulo (distancia) no entero
+
+                // X00                    X00               X00
+                // 000  Distancia 2       X00  Distancia 1  0X0  Distancia sqrt(2)
+                // X00                    000               000  Movimiento no válido
+
+                if (cubeVector.length() == 1 || cubeVector.length() == 2) {
+                    //El eje alrededor del cual se realiza el giro es perpendicular tanto
+                    //al vector que une ambos cubos como al vector normal a la cara seleccionada,
+                    //por lo que se calcula este mediante un producto vectorial
+                    ejeGiro = new THREE.Vector3().crossVectors(cubeVector, normal).normalize();
+                    const cmp = getNotZeroComponent(ejeGiro);
+                    capa = cubeArray.filter(function(c) {
+                        //Los 9 cubos a girar (la "capa") conforman un plano perpendicular al eje de giro
+                        //Por ello, los 9 comparten una coordenada que viene indicada por dicho eje
+                        return c.position.getComponent(cmp) == selectedCube.getComponent(cmp);
+                    });
+                    //Se inician los frames de animación
+                    framesRestantes = framesGiro;
+                }
+            }
+        }
+        selectedCube = undefined;
+        normal = undefined;
+    }
+
+    //Función que crea un cubo perteneciente al cubo de Rubik, dada su posicion esperada ("traslacion")
+    //Las caras del cubo deberán ser coloreadas según la posición de estas
+    function addCube(scene, traslacion) {
+        //Se define la geometría del cubo (lado 1)
+        var geometry = new THREE.BoxGeometry( 1, 1, 1 ).toNonIndexed();
+        //Array plano con las coordenadas de los vectores normales de los vertices del cubo
+        const normales = geometry.getAttribute('normal').array;
+        const colors = [];
+        var color = new THREE.Color();
+
+        //Cada cara del cubo está compuesta por 2 polígonos (triángulos), y cada uno de estos
+        //tiene 3 vértices independientes, por lo que se recorre el array de 6 en 6
+        for (let i = 0; i < geometry.getAttribute('normal').count; i += 6) {
+            //Se obtiene el vector normal al primer vértice
+            //(tiene la misma normal que el triángulo que lo contiene)
+            const vectNormal = new THREE.Vector3(normales[i*3],
+                normales[i*3 + 1], normales[i*3 + 2]);
+            color.setHex(0x000000); //Se colorea de negro por defecto
+            const cmp = getNotZeroComponent(vectNormal);
+            //Para considerar que la cara es externa, la componente no nula del vector normal
+            //debe ser igual a la componente del vector de posición del cubo
+            //Por ejemplo, si el vector normal es [0, 0, 1] (apuntando hacia Z=1)
+            //Las caras externas serán aquellas en una posición [x, y, 1]
+            if (traslacion.getComponent(cmp) == vectNormal.getComponent(cmp)) {
+                //Si la cara es externa, el color vendrá dado por el vector normal
+                const rgb = Object.keys(orientacionColores).find
+                    (color => orientacionColores[color].equals(vectNormal));
+                color.setHex(rgb);
+            }
+            //El color se almacena 6 veces, una por cada vértice
+            for (const ind of Array(6).keys()) {
+                colors.push(color.r, color.g, color.b);
+            }
+        }
+        //Se aplica los colores a la geometría
+        geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+        //Se define un material básico y se crea el cubo junto a la geometría definida
+        const material = new THREE.MeshBasicMaterial({vertexColors: true});
+        var cube = new THREE.Mesh(geometry, material);
+        //Se mueve el cubo a la posición establecida
+        cube.position.set(traslacion.x, traslacion.y, traslacion.z);
+        //Se definen y añaden al cubo las aristas de este
+        var edgeGeo = new THREE.EdgesGeometry(cube.geometry);
+        var lineMat = new THREE.LineBasicMaterial({color: 0x000000});
+        var edges = new THREE.LineSegments(edgeGeo, lineMat);
+        cube.add(edges);
+        
+        cubeArray.push(cube);
+        scene.add(cube);
+    }
+
+    //Función que inicializa los objetos básicos para la visualización y el cubo de rubik
+    function crearEscena() {
+        //Se define la escena, la cámara y el renderizador
+        scene = new THREE.Scene();
+        camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        renderer = new THREE.WebGLRenderer();
+        renderer.setSize( window.innerWidth, window.innerHeight);
+        //Se aplica un fondo gris
+        renderer.setClearColor(0x444444, 1);
+        document.body.appendChild(renderer.domElement);
+
+        //Se definen los cubos que componen el cubo de rubik
+        //Las posiciones de estos van de [-1,-1-1] a [1,1,1]
+        cubeArray = [];
+        for (var x = -1; x <= 1; x++) {
+            for (var y = -1; y <= 1; y++) {
+                for (var z = -1; z <= 1; z++) {
+                    const traslacion = new THREE.Vector3(x, y, z);
+                    addCube(scene, traslacion);
+                }
+            }          
+        }
+
+        //Se define el controlador de la cámara
+        camControls = new OrbitControls(camera, renderer.domElement);
+        camera.position.z = 6;
+        camControls.update();
+
+        //Se define el controlador de colisiones con el cursor
+        raycaster = new THREE.Raycaster();
+        raycaster.params = {
+            Mesh: {},
+            Line: {threshold: 0.001},    //Se reduce la tolerancia a la colisión con las aristas
+            LOD: {},                     //para evitar colisionar con estas en lugar de las caras
+            Points: {threshold: 1},      //de los cubos
+            Sprite: {}
+        }
+        raton = new THREE.Vector2();
+        framesRestantes = 0;
+        //Se definen los controladores de eventos para actualizar la posición del cursor
+        //y definir los movimientos del cubo de rubik
+        window.addEventListener('pointermove', onPointerMove);
+        window.addEventListener('mousedown', startMovement);
+        window.addEventListener('mouseup', confirmMovement);
+    }
+
+    //Función que actualiza la visualización cada frame
+    function gameLoop() {
+        renderer.render(scene, camera);
+        camControls.update();
+        //Si existe una animación en curso
+        if (framesRestantes > 0) {
+            capa.forEach(function(c) {
+                //Se rotan y mueven alrededor del eje de giro los cubos de la capa.
+                //El ángulo total recorrido serán 90º (pi/2 radianes)
+                c.position.applyAxisAngle(ejeGiro, Math.PI/(2 * framesGiro));
+                c.rotateOnWorldAxis(ejeGiro, Math.PI/(2 * framesGiro));
+            });
+            framesRestantes--;
+            if (framesRestantes == 0) {
+                //En el último frame, las posiciones de los cubos se redondean para que
+                //vuelvan a ser enteras (comprendidas entre [-1,-1,-1] y [1,1,1]), ya que
+                //el cálculo de vectores a partir de estas fallaría en caso contrario
+                capa.forEach(function(c) {
+                    c.position.round();
+                });
+            }
+        }
+        raycaster.setFromCamera( raton, camera );
+        window.requestAnimationFrame(gameLoop);
+    }
+
+    crearEscena();
+    gameLoop();
+</script>
+</html>
